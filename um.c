@@ -12,7 +12,35 @@ void error(const char *msg) { fprintf(stderr, "%s\n", msg); exit(0); }
 void postMessage(FILE *sockf, char *room, char *name, char *text) {
 	size_t length = strlen(name) + 2 + strlen(text) + 1;
 	fprintf(sockf, "POST /stream/%s HTTP/1.1\r\nHost: oboy.smilebasicsource.com\r\nContent-Length: %ld\r\n\r\n%s: %s\n", room, length, name, text);
-	fflush(sockf); // I really don't care about the response lol
+	static char *line = NULL;
+	static size_t size = 0;
+	ssize_t read;
+	// {the program will spend a long time waiting here}
+	read = getline(&line, &size, sockf); //response line 1
+	puts(line);
+	// read headers
+	ssize_t content_size = -1;
+	while (1) {
+		read = getline(&line, &size, sockf); //response line 1
+		if (read == 2) // final line
+			break;
+		else { //process headers here
+			if (!strncmp(line, "Content-Size: ", 14));
+			content_size = strtol(line+14, NULL, 10);
+		}
+	}
+	if (content_size == -1){
+		puts("error: missing content size");
+	} else if (content_size) {
+		unsigned char buffer[content_size];
+		size_t left = content_size;	
+		while (left) {
+			size_t read = fread(buffer, 1, left, sockf);
+			if (!read)
+				error("failed to read body");
+			left -= read;
+		}
+	}
 }
 
 // this function exists specifically so we can allocate onto the stack
