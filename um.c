@@ -1,5 +1,6 @@
 // https://stackoverflow.com/a/22135885/6232794
 #include <stdio.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h> /* fork */
@@ -9,28 +10,49 @@
 
 void error(const char *msg) { fprintf(stderr, "%s\n", msg); exit(0); }
 
-void postMessage(FILE *sockf, char *room, char *name, char *text) {
+FILE *make_socket(struct sockaddr_in *serv_addr) {
+	int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+	if (sockfd < 0)
+		error("ERROR opening socket");
+	if (connect(sockfd, (struct sockaddr *)serv_addr, sizeof(struct sockaddr_in)) < 0)
+		error("ERROR connecting");
+	return fdopen(sockfd, "w+");
+}
+
+bool postMessage(struct sockaddr_in *addr, char *room, char *name, char *text) {
+	static FILE *sockf = NULL;
+	if (!sockf)
+		sockf = make_socket(addr);
 	size_t length = strlen(name) + 2 + strlen(text) + 1;
-	fprintf(sockf, "POST /stream/%s HTTP/1.1\r\nHost: oboy.smilebasicsource.com\r\nContent-Length: %ld\r\n\r\n%s: %s\n", room, length, name, text);
+	fprintf(sockf, "POST /stream/%s HTTP/1.1\r\nHost: oboy.smilebasicsource.com:80\r\nContent-Length: %ld\r\n\r\n%s: %s\n", room, length, name, text);
 	static char *line = NULL;
 	static size_t size = 0;
 	ssize_t read;
-	// {the program will spend a long time waiting here}
+
 	read = getline(&line, &size, sockf); //response line 1
-	puts(line);
+	if (read < 0) {
+		perror("failed to read response");
+		exit(1);
+	}
 	// read headers
 	ssize_t content_size = -1;
+	bool keep_alive = 0;
 	while (1) {
-		read = getline(&line, &size, sockf); //response line 1
+		read = getline(&line, &size, sockf); //header
+		if (read < 0)
+			error("failed to read header");
 		if (read == 2) // final line
 			break;
 		else { //process headers here
-			if (!strncmp(line, "Content-Size: ", 14));
-			content_size = strtol(line+14, NULL, 10);
+			//puts(line);
+			if (!strncmp(line, "Content-Length: ", 14))
+				content_size = strtol(line+14, NULL, 10);
+			else if (!strncmp(line, "Connection: keep-alive\r\n", 24))
+				keep_alive = 1;
 		}
 	}
 	if (content_size == -1){
-		puts("error: missing content size");
+		error("error: missing content size");
 	} else if (content_size) {
 		unsigned char buffer[content_size];
 		size_t left = content_size;	
@@ -40,6 +62,10 @@ void postMessage(FILE *sockf, char *room, char *name, char *text) {
 				error("failed to read body");
 			left -= read;
 		}
+	}
+	if (!keep_alive) {
+		fclose(sockf);
+		sockf = make_socket(addr);
 	}
 }
 
@@ -57,7 +83,10 @@ void read_chunk(FILE *file, size_t size) {
 }
 
 // long polling recieve
-void pollPoll(FILE *sockf, char *room, size_t *start) {
+bool pollPoll(struct sockaddr_in *addr, char *room, size_t *start) {
+	static FILE *sockf = NULL;
+	if (!sockf)
+		sockf = make_socket(addr);
 	fprintf(sockf, "GET /stream/%s?start=%ld HTTP/1.1\r\nHost: oboy.smilebasicsource.com:80\r\n\r\n", room, *start);
 	static char *line = NULL;
 	static size_t size = 0;
@@ -65,12 +94,16 @@ void pollPoll(FILE *sockf, char *room, size_t *start) {
 	// {the program will spend a long time waiting here}
 	read = getline(&line, &size, sockf); //response line 1
 	// read headers
+	bool keep_alive = 0;
 	while (1) {
-		read = getline(&line, &size, sockf); //response line 1
+		read = getline(&line, &size, sockf); //header
 		if (read == 2) // final line
 			break;
-		else
-			; //process headers here
+		else {
+			if (!strncmp(line, "Connection: keep-alive\r\n", 24))
+				keep_alive = 1;
+			//process headers here
+		}
 	}
 	while (1) {
 		// read chunked response
@@ -83,6 +116,10 @@ void pollPoll(FILE *sockf, char *room, size_t *start) {
 		read = getline(&line, &size, sockf); //trailing newline
 	}
 	read = getline(&line, &size, sockf); //empty line after last chunk
+	if (!keep_alive) {
+		fclose(sockf);
+		sockf = make_socket(addr);
+	}
 }
 
 int main(int argc, char *argv[]) {
@@ -99,20 +136,11 @@ int main(int argc, char *argv[]) {
 	serv_addr.sin_port = htons(80);
 	memcpy(&serv_addr.sin_addr.s_addr, server->h_addr, server->h_length);
 	
-	int f = fork();
-	// separate socket created in each process
-	// sockets are only opened once, and reused for all requests
-	int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-	if (sockfd < 0)
-		error("ERROR opening socket");
-	if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0)
-		error("ERROR connecting");
-	FILE *sockf = fdopen(sockfd, "w+");
-	
-	if (f) { // recv
+	if (fork()) { // recv
 		size_t start = 0;
-		while (1) 
-			pollPoll(sockf, argv[1], &start);
+		while (1) {
+			pollPoll(&serv_addr, argv[1], &start);
+		}
 	} else { // send
 		char *line = NULL;
 		size_t size;
@@ -120,7 +148,7 @@ int main(int argc, char *argv[]) {
 			ssize_t r = getline(&line, &size, stdin);
 			if (r > 0) {
 				line[r-1] = '\0'; //strip newline
-				postMessage(sockf, argv[1], argv[2], line);
+				postMessage(&serv_addr, argv[1], argv[2], line);
 			}
 		}
 	}
