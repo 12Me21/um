@@ -1,2 +1,2 @@
 um: um.o
-	cc um.o -o um
+	cc -Wall -Wextra -pedantic um.o -o um
