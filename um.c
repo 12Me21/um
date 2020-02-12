@@ -1,4 +1,4 @@
-// https://stackoverflow.com/a/22135885/6232794
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -7,6 +7,7 @@
 #include <sys/socket.h> /* socket, connect */
 #include <netinet/in.h> /* struct sockaddr_in, struct sockaddr */
 #include <netdb.h> /* struct hostent, gethostbyname */
+// https://stackoverflow.com/a/22135885/6232794
 
 void error(const char *msg) { fprintf(stderr, "%s\n", msg); exit(0); }
 
@@ -19,8 +20,11 @@ FILE *make_socket(struct sockaddr_in *serv_addr) {
 	return fdopen(sockfd, "w+");
 }
 
-// this function exists specifically so we can allocate onto the stack
-void read_chunk(FILE *file, size_t size, void *start) {
+// read a chunk and print it (if start is not NULL)
+// increment *start by the size of the data
+void read_chunk(FILE *file, ssize_t size, void *start) {
+	if (size < 0)
+		return;
 	unsigned char buffer[size];
 	size_t left = size;
 	while (left) {
@@ -35,9 +39,17 @@ void read_chunk(FILE *file, size_t size, void *start) {
 	}
 }
 
-// returns 0 if the connection has been closed
 // the callback function MUST read the requested amount of data from the file
-bool readResponse(FILE *sockf, void (*callback)(FILE *, size_t, void *), void *user) {
+// callback will be called 1 extra time after all data is read, with size set to -1
+void httpRequest(struct sockaddr_in *addr, FILE **sockf_in, void (*callback)(FILE *, ssize_t, void *), void *user, char *format, ...) {
+	if (!*sockf_in)
+		*sockf_in = make_socket(addr);
+	FILE *sockf = *sockf_in;
+	va_list args;
+	va_start(args, format);
+	vfprintf(sockf, format, args);
+	va_end(args);
+	
 	char *line = NULL;
 	size_t size = 0;
 	ssize_t read;
@@ -78,36 +90,29 @@ bool readResponse(FILE *sockf, void (*callback)(FILE *, size_t, void *), void *u
 		}
 		read = getline(&line, &size, sockf); //empty line after last chunk
 	} else {
-		if (content_size == -1)
+		if (content_size < 0)
 			error("error: missing content size");
 		callback(sockf, content_size, user);
 	}
+	callback(sockf, -1, user);
 	free(line);
-	return keep_alive;
+	if (!keep_alive) {
+		fclose(sockf);
+		*sockf_in = make_socket(addr);
+	}
 }
 
+// send message in chat
 bool postMessage(struct sockaddr_in *addr, char *room, char *name, char *text) {
 	static FILE *sockf = NULL;
-	if (!sockf)
-		sockf = make_socket(addr);
 	size_t length = strlen(name) + 2 + strlen(text) + 1;
-	fprintf(sockf, "POST /stream/%s HTTP/1.1\r\nHost: oboy.smilebasicsource.com:80\r\nContent-Length: %ld\r\n\r\n%s: %s\n", room, length, name, text);
-	if (!readResponse(sockf, read_chunk, NULL)) {
-		fclose(sockf);
-		sockf = make_socket(addr);
-	}
+	httpRequest(addr, &sockf, read_chunk, NULL, "POST /stream/%s HTTP/1.1\r\nHost: oboy.smilebasicsource.com:80\r\nContent-Length: %ld\r\n\r\n%s: %s\n", room, length, name, text);
 }
 
 // long polling recieve
 bool pollPoll(struct sockaddr_in *addr, char *room, size_t *start) {
 	static FILE *sockf = NULL;
-	if (!sockf)
-		sockf = make_socket(addr);
-	fprintf(sockf, "GET /stream/%s?start=%ld HTTP/1.1\r\nHost: oboy.smilebasicsource.com:80\r\n\r\n", room, *start);
-	if (!readResponse(sockf, read_chunk, start)) {
-		fclose(sockf);
-		sockf = make_socket(addr);
-	}
+	httpRequest(addr, &sockf, read_chunk, start, "GET /stream/%s?start=%ld HTTP/1.1\r\nHost: oboy.smilebasicsource.com:80\r\n\r\n", room, *start);
 }
 
 int main(int argc, char *argv[]) {
