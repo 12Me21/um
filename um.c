@@ -47,7 +47,6 @@ void httpRequest(struct sockaddr_in *addr, FILE **sockf_in, void (*callback)(FIL
 		sockf = make_socket(addr);
 	else
 		sockf = *sockf_in;
-	
 	va_list args;
 	va_start(args, format);
 	vfprintf(sockf, format, args);
@@ -99,10 +98,14 @@ void httpRequest(struct sockaddr_in *addr, FILE **sockf_in, void (*callback)(FIL
 	}
 	callback(sockf, -1, user);
 	free(line);
-	if (!keep_alive) {
+	if (sockf_in) {
+		if (!keep_alive) {
+			fclose(sockf);
+			sockf = make_socket(addr);
+		}
+		*sockf_in = sockf;
+	} else {
 		fclose(sockf);
-		if (sockf_in)
-			*sockf_in = make_socket(addr);
 	}
 }
 
