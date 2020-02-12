@@ -3,10 +3,10 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h> /* fork */
-#include <sys/socket.h> /* socket, connect */
-#include <netinet/in.h> /* struct sockaddr_in, struct sockaddr */
-#include <netdb.h> /* struct hostent, gethostbyname */
+#include <unistd.h>
+#include <netdb.h>
+#include <pthread.h>
+
 // https://stackoverflow.com/a/22135885/6232794
 
 void error(const char *msg) { fprintf(stderr, "%s\n", msg); exit(0); }
@@ -16,7 +16,7 @@ FILE *make_socket(struct sockaddr_in *serv_addr) {
 	if (sockfd < 0)
 		error("ERROR opening socket");
 	if (connect(sockfd, (struct sockaddr *)serv_addr, sizeof(struct sockaddr_in)) < 0)
-		error("ERROR connecting");
+		perror("ERROR connecting");
 	return fdopen(sockfd, "w+");
 }
 
@@ -42,9 +42,12 @@ void read_chunk(FILE *file, ssize_t size, void *start) {
 // the callback function MUST read the requested amount of data from the file
 // callback will be called 1 extra time after all data is read, with size set to -1
 void httpRequest(struct sockaddr_in *addr, FILE **sockf_in, void (*callback)(FILE *, ssize_t, void *), void *user, char *format, ...) {
-	if (!*sockf_in)
-		*sockf_in = make_socket(addr);
-	FILE *sockf = *sockf_in;
+	FILE *sockf;
+	if (!sockf_in || !*sockf_in)
+		sockf = make_socket(addr);
+	else
+		sockf = *sockf_in;
+	
 	va_list args;
 	va_start(args, format);
 	vfprintf(sockf, format, args);
@@ -98,21 +101,67 @@ void httpRequest(struct sockaddr_in *addr, FILE **sockf_in, void (*callback)(FIL
 	free(line);
 	if (!keep_alive) {
 		fclose(sockf);
-		*sockf_in = make_socket(addr);
+		if (sockf_in)
+			*sockf_in = make_socket(addr);
 	}
 }
 
 // send message in chat
-bool postMessage(struct sockaddr_in *addr, char *room, char *name, char *text) {
-	static FILE *sockf = NULL;
+bool postMessage(struct sockaddr_in *addr, FILE **sockf, char *room, char *name, char *text) {
 	size_t length = strlen(name) + 2 + strlen(text) + 1;
-	httpRequest(addr, &sockf, read_chunk, NULL, "POST /stream/%s HTTP/1.1\r\nHost: oboy.smilebasicsource.com:80\r\nContent-Length: %ld\r\n\r\n%s: %s\n", room, length, name, text);
+	httpRequest(addr, sockf, read_chunk, NULL, "POST /stream/%s HTTP/1.1\r\nHost: oboy.smilebasicsource.com:80\r\nContent-Length: %ld\r\n\r\n%s: %s\n", room, length, name, text);
 }
 
 // long polling recieve
-bool pollPoll(struct sockaddr_in *addr, char *room, size_t *start) {
-	static FILE *sockf = NULL;
-	httpRequest(addr, &sockf, read_chunk, start, "GET /stream/%s?start=%ld HTTP/1.1\r\nHost: oboy.smilebasicsource.com:80\r\n\r\n", room, *start);
+bool pollPoll(struct sockaddr_in *addr, FILE **sockf, char *room, size_t *start) {
+	httpRequest(addr, sockf, read_chunk, start, "GET /stream/%s?start=%ld HTTP/1.1\r\nHost: oboy.smilebasicsource.com:80\r\n\r\n", room, *start);
+}
+
+struct data {
+	struct sockaddr_in addr;
+	char *username;
+	char *room;
+	size_t start;
+	pthread_t thread2;
+	FILE *sockf2;
+};
+
+void *thread2(void *data_in) {
+	struct data *data = data_in;
+	while (1) {
+		pollPoll(&data->addr, &data->sockf2, data->room, &data->start);
+	}
+}
+
+void switch_room(struct data *data, char *room) {
+	printf(" Switching to room: '%s'\n", room);
+	// cancel request
+	pthread_cancel(data->thread2);
+	data->sockf2 = NULL;
+	data->start = 0;
+	free(data->room);
+	data->room = strdup(room);
+	// start new request
+	pthread_create(&data->thread2, NULL, thread2, data);
+	//todo: cancel other poll
+}
+
+void *thread1(void *data_in) {
+	struct data *data = data_in;
+	char *line = NULL;
+	size_t size;
+	FILE *sockf;
+	while (1) {
+		ssize_t r = getline(&line, &size, stdin);
+		if (r > 0) {
+			line[r-1] = '\0'; //strip newline
+			if (line[0]=='/') {
+				switch_room(data, line+1);
+			} else {
+				postMessage(&data->addr, &sockf, data->room, data->username, line);
+			}
+		}
+	}
 }
 
 int main(int argc, char *argv[]) {
@@ -124,25 +173,20 @@ int main(int argc, char *argv[]) {
 	struct hostent *server = gethostbyname("oboy.smilebasicsource.com");
 	if (!server)
 		error("ERROR, host not found");
-	struct sockaddr_in serv_addr;
-	serv_addr.sin_family = AF_INET;
-	serv_addr.sin_port = htons(80);
-	memcpy(&serv_addr.sin_addr.s_addr, server->h_addr, server->h_length);
 	
-	if (fork()) { // recv
-		size_t start = 0;
-		while (1) {
-			pollPoll(&serv_addr, argv[1], &start);
-		}
-	} else { // send
-		char *line = NULL;
-		size_t size;
-		while (1) {
-			ssize_t r = getline(&line, &size, stdin);
-			if (r > 0) {
-				line[r-1] = '\0'; //strip newline
-				postMessage(&serv_addr, argv[1], argv[2], line);
-			}
-		}
-	}
+	struct data data;
+	data.addr.sin_family = AF_INET;
+	data.addr.sin_port = htons(80);
+	memcpy(&data.addr.sin_addr.s_addr, server->h_addr, server->h_length);
+	data.username = strdup(argv[2]);
+	data.room = strdup(argv[1]);
+	data.start = 0;
+	data.sockf2 = NULL;
+	
+	pthread_t t1;
+	pthread_create(&t1, NULL, thread1, &data);
+	pthread_create(&data.thread2, NULL, thread2, &data);
+	
+	pthread_join(t1, NULL);
+	pthread_join(data.thread2, NULL);
 }
