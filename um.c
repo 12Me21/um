@@ -19,16 +19,29 @@ FILE *make_socket(struct sockaddr_in *serv_addr) {
 	return fdopen(sockfd, "w+");
 }
 
-bool postMessage(struct sockaddr_in *addr, char *room, char *name, char *text) {
-	static FILE *sockf = NULL;
-	if (!sockf)
-		sockf = make_socket(addr);
-	size_t length = strlen(name) + 2 + strlen(text) + 1;
-	fprintf(sockf, "POST /stream/%s HTTP/1.1\r\nHost: oboy.smilebasicsource.com:80\r\nContent-Length: %ld\r\n\r\n%s: %s\n", room, length, name, text);
-	static char *line = NULL;
-	static size_t size = 0;
-	ssize_t read;
+// this function exists specifically so we can allocate onto the stack
+void read_chunk(FILE *file, size_t size, void *start) {
+	unsigned char buffer[size];
+	size_t left = size;
+	while (left) {
+		size_t read = fread(buffer + (size - left), 1, left, file);
+		if (!read)
+			error("failed to read body");
+		left -= read;
+	}
+	if (start) {
+		*(size_t *)start += size;
+		fwrite(buffer, 1, size, stdout); //print
+	}
+}
 
+// returns 0 if the connection has been closed
+// the callback function MUST read the requested amount of data from the file
+bool readResponse(FILE *sockf, void (*callback)(FILE *, size_t, void *), void *user) {
+	char *line = NULL;
+	size_t size = 0;
+	ssize_t read;
+	// the program might wait here for a while
 	read = getline(&line, &size, sockf); //response line 1
 	if (read < 0) {
 		perror("failed to read response");
@@ -37,6 +50,7 @@ bool postMessage(struct sockaddr_in *addr, char *room, char *name, char *text) {
 	// read headers
 	ssize_t content_size = -1;
 	bool keep_alive = 0;
+	bool chunked = 0;
 	while (1) {
 		read = getline(&line, &size, sockf); //header
 		if (read < 0)
@@ -44,42 +58,44 @@ bool postMessage(struct sockaddr_in *addr, char *room, char *name, char *text) {
 		if (read == 2) // final line
 			break;
 		else { //process headers here
-			//puts(line);
 			if (!strncmp(line, "Content-Length: ", 14))
 				content_size = strtol(line+14, NULL, 10);
-			else if (!strncmp(line, "Connection: keep-alive\r\n", 24))
+			else if (!strcmp(line, "Connection: keep-alive\r\n"))
 				keep_alive = 1;
+			else if (!strcmp(line, "Transfer-Encoding: chunked\r\n"))
+				chunked = 1;
 		}
 	}
-	if (content_size == -1){
-		error("error: missing content size");
-	} else if (content_size) {
-		unsigned char buffer[content_size];
-		size_t left = content_size;	
-		while (left) {
-			size_t read = fread(buffer, 1, left, sockf);
-			if (!read)
-				error("failed to read body");
-			left -= read;
+	if (chunked) {
+		while (1) {
+			// read chunked response
+			read = getline(&line, &size, sockf); //chunk size
+			size_t chunk_size = strtol(line, NULL, 16);
+			if (!chunk_size)
+				break;
+			callback(sockf, chunk_size, user);
+			read = getline(&line, &size, sockf); //trailing newline
 		}
+		read = getline(&line, &size, sockf); //empty line after last chunk
+	} else {
+		if (content_size == -1)
+			error("error: missing content size");
+		callback(sockf, content_size, user);
 	}
-	if (!keep_alive) {
+	free(line);
+	return keep_alive;
+}
+
+bool postMessage(struct sockaddr_in *addr, char *room, char *name, char *text) {
+	static FILE *sockf = NULL;
+	if (!sockf)
+		sockf = make_socket(addr);
+	size_t length = strlen(name) + 2 + strlen(text) + 1;
+	fprintf(sockf, "POST /stream/%s HTTP/1.1\r\nHost: oboy.smilebasicsource.com:80\r\nContent-Length: %ld\r\n\r\n%s: %s\n", room, length, name, text);
+	if (!readResponse(sockf, read_chunk, NULL)) {
 		fclose(sockf);
 		sockf = make_socket(addr);
 	}
-}
-
-// this function exists specifically so we can allocate onto the stack
-void read_chunk(FILE *file, size_t size) {
-	unsigned char buffer[size];
-	size_t left = size;
-	while (left) {
-		size_t read = fread(buffer, 1, left, file);
-		if (!read)
-			error("failed to read body");
-		left -= read;
-	}
-	fwrite(buffer, 1, size, stdout); //print
 }
 
 // long polling recieve
@@ -88,35 +104,7 @@ bool pollPoll(struct sockaddr_in *addr, char *room, size_t *start) {
 	if (!sockf)
 		sockf = make_socket(addr);
 	fprintf(sockf, "GET /stream/%s?start=%ld HTTP/1.1\r\nHost: oboy.smilebasicsource.com:80\r\n\r\n", room, *start);
-	static char *line = NULL;
-	static size_t size = 0;
-	ssize_t read;
-	// {the program will spend a long time waiting here}
-	read = getline(&line, &size, sockf); //response line 1
-	// read headers
-	bool keep_alive = 0;
-	while (1) {
-		read = getline(&line, &size, sockf); //header
-		if (read == 2) // final line
-			break;
-		else {
-			if (!strncmp(line, "Connection: keep-alive\r\n", 24))
-				keep_alive = 1;
-			//process headers here
-		}
-	}
-	while (1) {
-		// read chunked response
-		read = getline(&line, &size, sockf); //chunk size
-		size_t chunk_size = strtol(line, NULL, 16);
-		if (!chunk_size)
-			break;
-		read_chunk(sockf, chunk_size);
-		*start += chunk_size;
-		read = getline(&line, &size, sockf); //trailing newline
-	}
-	read = getline(&line, &size, sockf); //empty line after last chunk
-	if (!keep_alive) {
+	if (!readResponse(sockf, read_chunk, start)) {
 		fclose(sockf);
 		sockf = make_socket(addr);
 	}
@@ -153,4 +141,3 @@ int main(int argc, char *argv[]) {
 		}
 	}
 }
-// this file does not directly call free or fclose!
