@@ -1,5 +1,5 @@
-um: um.o
-	cc -Wall -Wextra -pedantic um.o -o um -lpthread
+draw: draw.o
+	cc -Wall -Wextra -pedantic draw.o -o draw -lpthread
 
-um.o: um.c
-	cc -c um.c -O2
+draw.o: draw.c
+	cc -c draw.c -O2
