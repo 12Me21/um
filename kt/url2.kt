@@ -31,22 +31,20 @@ class Connection() {
 	}
 	
 	fun run() {
+		if (running) {
+			return
+		}
 		GlobalScope.launch {
 			running = true
-			while (true) {
+			while (running) {
 				var request = Request.Builder().url("http://oboy.smilebasicsource.com/stream/$room?start=$start").build()
-				var call_ = okHttpClient.newCall(request)
-				call = call_
+				call = okHttpClient.newCall(request)
 				try {
-					var x = call_.execute().body?.string()
-					x?.let {
-						print(x)
-						start += x.length
+					call?.execute()?.body?.string()?.let {
+						print(it)
+						start += it.length
 					}
 				} catch(e: IOException) {
-				}
-				if (!running) {
-					break;
 				}
 			}
 		}
@@ -57,17 +55,17 @@ fun connect(room: String) {
 }
 
 fun main() = runBlocking {
-	println("OK! ♥")
+	println("starting (enter room name)")
 	var conn = Connection()
-	conn
-	conn.run()
 	while (true) {
-		var room = readLine()
-		room?.let {
-			conn.switchRoom(room)
+		var room = readLine() ?: ""
+		if (room == "") {
+			break
 		}
+		println("Switching to room '$room'")
+		conn.switchRoom(room)
 	}
-	println("hecko")
+	conn.stop()
 }
 
 //gsquitnw_t
