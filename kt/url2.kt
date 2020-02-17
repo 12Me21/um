@@ -1,16 +1,23 @@
 @file:DependsOn("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.3.3")
 @file:DependsOn("com.squareup.okhttp3:okhttp:4.3.1")
+@file:DependsOn("ru.gildor.coroutines:kotlin-coroutines-okhttp:1.0")
 
 import kotlinx.coroutines.*
 import okhttp3.*
 import java.util.concurrent.TimeUnit
 import java.io.IOException
+import ru.gildor.coroutines.okhttp.*
 
 val okHttpClient = OkHttpClient.Builder()
 	.readTimeout(0, TimeUnit.DAYS)
 	.build()
 
-class Connection() {
+fun buildRequest(url: String): Request {
+	return Request.Builder().url(url).build()
+}
+
+class Connection(callback_: (String)->Unit) {
+	val callback = callback_
 	var call: Call? = null
 	var room: String? = null
 	var running = false
@@ -34,29 +41,29 @@ class Connection() {
 		if (running) {
 			return
 		}
+		running = true
 		GlobalScope.launch {
-			running = true
 			while (running) {
-				var request = Request.Builder().url("http://oboy.smilebasicsource.com/stream/$room?start=$start").build()
+				val request = buildRequest("http://oboy.smilebasicsource.com/stream/$room?start=$start")
 				call = okHttpClient.newCall(request)
 				try {
-					call?.execute()?.body?.string()?.let {
-						print(it)
-						start += it.length
+					val response = call?.execute()
+					response?.let {
+						it.body?.string()?.let {
+							callback(it)
+							start += it.length
+						}
 					}
 				} catch(e: IOException) {
 				}
 			}
-		}
+		}.start()
 	}
-}
-
-fun connect(room: String) {
 }
 
 fun main() = runBlocking {
 	println("starting (enter room name)")
-	var conn = Connection()
+	var conn = Connection({ x -> print(x); System.out.flush()})
 	while (true) {
 		var room = readLine() ?: ""
 		if (room == "") {
@@ -68,4 +75,4 @@ fun main() = runBlocking {
 	conn.stop()
 }
 
-//gsquitnw_t
+//gsquitnw_tn
