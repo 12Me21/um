@@ -12,9 +12,6 @@ val okHttpClient = OkHttpClient.Builder()
 	.readTimeout(0, TimeUnit.DAYS)
 	.build()
 
-// a room can be active or inactive
-// when the room is active, its data will be kept up to date at all times
-// when inactive, the data will not be updated
 class Room(name_: String, onData_: (ByteArray)->Unit) {
 	val name = name_
 	val onData = onData_
@@ -31,7 +28,7 @@ class Room(name_: String, onData_: (ByteArray)->Unit) {
 	fun enter() {
 		if (active) return
 		active = true
-		if (data.size > 0) {
+		if (data.size > 0) { // if there is already cached data
 			onData(data)
 		}
 		GlobalScope.launch {
@@ -69,16 +66,22 @@ class Room(name_: String, onData_: (ByteArray)->Unit) {
 
 fun main() = runBlocking {
 	println("starting (enter room name)")
-	var room: Room? = null
+	val rooms: HashMap<String, Room> = hashMapOf()
+	var current: Room? = null
 	while (true) {
-		var name = readLine() ?: ""
-		room?.exit()
+		val name = readLine() ?: ""
+		current?.exit()
 		if (name == "") {
 			break
 		}
+		
+		current = rooms.get(name)
+		if (current == null) {
+			current = Room(name, { x -> print(x.toString(Charsets.UTF_8)); System.out.flush()})
+			rooms.put(name, current)
+		}
 		println("Switching to room '$name'")
-		room = Room(name, { x -> print(x.toString(Charsets.UTF_8)); System.out.flush()})
-		room.enter()
+		current?.enter()
 	}
 }
 
