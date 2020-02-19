@@ -45,7 +45,9 @@ class Room(name_: String, onData_: (ByteArray)->Unit) {
 		val request = Request.Builder().url("http://oboy.smilebasicsource.com/stream/$name?start=${data.size}").build()
 		call = okHttpClient.newCall(request)
 		try {
+			println("START")
 			val response = call?.execute()
+			println("FINISH")
 			response?.let {
 				it.body?.bytes()?.let {
 					data += it
@@ -75,9 +77,9 @@ class Rooms(onData_: (ByteArray)->Unit) {
 			rooms[name] = Room(name, onData)
 		}
 		current = rooms[name]
-		current.enter()
+		current!!.enter()
 	}
-
+	
 	fun exit() {
 		current?.exit()
 		current = null
@@ -96,9 +98,9 @@ fun main() = runBlocking {
 			break
 		}
 		println("Switching to room '$name'")
-		Rooms.switch(name)
+		rooms.switch(name)
 	}
-	Rooms.exit()
+	rooms.exit()
 }
 
 //gsquitnw_tn
