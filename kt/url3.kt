@@ -10,6 +10,8 @@ val okHttpClient = OkHttpClient.Builder()
 	.readTimeout(0, TimeUnit.DAYS)
 	.build()
 
+// callback must never be called before .enter() or after .exit()
+// todo: make sure this is true
 class Room(name_: String, onData_: (ByteArray)->Unit) {
 	val name = name_
 	val onData = onData_
@@ -62,25 +64,41 @@ class Room(name_: String, onData_: (ByteArray)->Unit) {
 	}
 }
 
-fun main() = runBlocking {
-	println("starting (enter room name)")
+class Rooms(onData_: (ByteArray)->Unit) {
 	val rooms: HashMap<String, Room> = hashMapOf()
 	var current: Room? = null
+	var onData = onData_
+	
+	fun switch(name: String) {
+		current?.exit()
+		if (rooms[name] == null) {
+			rooms[name] = Room(name, onData)
+		}
+		current = rooms[name]
+		current.enter()
+	}
+
+	fun exit() {
+		current?.exit()
+		current = null
+	}
+}
+
+fun main() = runBlocking {
+	println("starting (enter room name)")
+	val rooms = Rooms(){
+		print(it.toString(Charsets.UTF_8))
+		System.out.flush()
+	}
 	while (true) {
 		val name = readLine() ?: ""
-		current?.exit()
 		if (name == "") {
 			break
 		}
-		
-		current = rooms.get(name)
-		if (current == null) {
-			current = Room(name, { x -> print(x.toString(Charsets.UTF_8)); System.out.flush()})
-			rooms.put(name, current)
-		}
 		println("Switching to room '$name'")
-		current?.enter()
+		Rooms.switch(name)
 	}
+	Rooms.exit()
 }
 
 //gsquitnw_tn
